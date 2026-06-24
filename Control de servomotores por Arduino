@@ -1,0 +1,172 @@
+#include <Servo.h>
+
+Servo myservo1;  // Escalón (0-180°)
+Servo myservo2;  // Clasificador (0-270°)
+
+// Posiciones para escalón (0-180°)
+const int POS_ESCALON_0 = 0;     
+const int POS_ESCALON_45 = 45;   
+
+// Posiciones para clasificador (0-180°)
+const int POS_CLASIFICADOR_0 = 0;      // Posición inicial
+const int POS_CLASIFICADOR_ID0 = 0;    // Para ID 0
+const int POS_CLASIFICADOR_ID1 = 90;   // Para ID 1
+const int POS_CLASIFICADOR_ID2 = 180;  // Para ID 2
+const int POS_CLASIFICADOR_X = 45;     // Para marcador no válido (X)
+
+// Variables de control
+unsigned long tiempoInicio;
+bool enMovimiento = false;
+char comandoPendiente = ' ';
+
+// Constantes de tiempo
+const int TIEMPO_TIMEOUT = 4000;
+const int TIEMPO_CLASIFICADOR = 1200;
+const int TIEMPO_ESCALON = 800;
+const int TIEMPO_PAUSA = 300;
+
+void setup() {
+  Serial.begin(9600);
+  
+  // Adjuntar servos
+  myservo1.attach(7);
+  myservo2.attach(4);
+  
+  // Posiciones iniciales
+  myservo1.write(POS_ESCALON_0);
+  myservo2.write(POS_CLASIFICADOR_0);
+  
+  // Configurar sensor
+  pinMode(11, INPUT);
+  
+  Serial.println("Sistema de clasificación listo");
+  Serial.println("Esperando objetos...");
+}
+
+void loop() {
+  // Timeout para movimientos atascados
+  if (enMovimiento && (millis() - tiempoInicio > TIEMPO_TIMEOUT)) {
+    Serial.println("⚠️ Timeout - Reiniciando servos");
+    reiniciarSistema();
+    enMovimiento = false;
+    delay(500);
+  }
+  
+  int presence = digitalRead(11);
+  
+  // Si hay objeto presente, no hay movimiento en curso, y hay datos seriales
+  if (presence == 0 && !enMovimiento && Serial.available() > 0) {
+    char comando = Serial.read();
+    comandoPendiente = comando;
+    enMovimiento = true;
+    tiempoInicio = millis();
+    
+    Serial.print("📥 Comando recibido: ");
+    Serial.println(comando);
+    
+    procesarComando(comando);
+    
+    enMovimiento = false;
+    Serial.println("✅ Movimiento completado");
+    Serial.println("Esperando siguiente objeto...");
+  } else if (presence == 1) {
+    delay(50);
+  }
+}
+
+void procesarComando(char comando) {
+  int posClasificador;
+  String mensaje;
+  
+  switch(comando) {
+    case '0':
+      posClasificador = POS_CLASIFICADOR_ID0;
+      mensaje = "ID 0 - Enviando a contenedor 0";
+      break;
+      
+    case '1':
+      posClasificador = POS_CLASIFICADOR_ID1;
+      mensaje = "ID 1 - Enviando a contenedor 1";
+      break;
+      
+    case '2':
+      posClasificador = POS_CLASIFICADOR_ID2;
+      mensaje = "ID 2 - Enviando a contenedor 2";
+      break;
+      
+    case 'X':
+      posClasificador = POS_CLASIFICADOR_X;
+      mensaje = "ID no válido - Enviando a contenedor de descarte";
+      break;
+      
+    default:
+      posClasificador = POS_CLASIFICADOR_X;
+      mensaje = "Comando no reconocido - Enviando a descarte";
+      break;
+  }
+  
+  Serial.println(mensaje);
+  Serial.print("🎯 Moviendo clasificador a: ");
+  Serial.print(posClasificador);
+  Serial.println("°");
+  
+  ejecutarSecuencia(posClasificador);
+}
+
+void ejecutarSecuencia(int posClasificador) {
+  // 1. Mover clasificador a la posición deseada
+  moverSuave(myservo2, myservo2.read(), posClasificador, TIEMPO_CLASIFICADOR);
+  delay(TIEMPO_PAUSA);
+  
+  // 2. Mover escalón a 45° (levantar)
+  moverSuave(myservo1, myservo1.read(), POS_ESCALON_45, TIEMPO_ESCALON);
+  delay(TIEMPO_PAUSA);
+  
+  // 3. Pausa para que el objeto caiga
+  delay(500);
+  
+  // 4. Mover escalón a 0° (bajar)
+  moverSuave(myservo1, myservo1.read(), POS_ESCALON_0, TIEMPO_ESCALON);
+  delay(TIEMPO_PAUSA);
+  
+  // 5. Regresar clasificador a 0°
+  if (posClasificador != POS_CLASIFICADOR_0) {
+    moverSuave(myservo2, myservo2.read(), POS_CLASIFICADOR_0, TIEMPO_CLASIFICADOR);
+  }
+  
+  delay(TIEMPO_PAUSA);
+}
+
+void moverSuave(Servo &servo, int inicio, int destino, int tiempoTotal) {
+  // Si ya está en la posición, no hacer nada
+  if (inicio == destino) return;
+  
+  int pasos = 20;
+  int distancia = abs(destino - inicio);
+  
+  if (distancia < 30) {
+    pasos = 10;
+  } else if (distancia > 100) {
+    pasos = 30;
+  }
+  
+  float incremento = (float)(destino - inicio) / pasos;
+  int tiempoPausa = tiempoTotal / pasos;
+  
+  for (int i = 1; i <= pasos; i++) {
+    int posIntermedia = inicio + round(incremento * i);
+    servo.write(posIntermedia);
+    delay(tiempoPausa);
+  }
+  
+  servo.write(destino);
+  delay(50);
+}
+
+void reiniciarSistema() {
+  Serial.println("🔄 Reiniciando sistema...");
+  myservo1.write(POS_ESCALON_0);
+  myservo2.write(POS_CLASIFICADOR_0);
+  delay(500);
+  Serial.println("✅ Sistema reiniciado");
+}
