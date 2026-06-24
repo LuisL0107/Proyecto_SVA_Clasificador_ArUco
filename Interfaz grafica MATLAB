@@ -1,0 +1,910 @@
+function ArUco_GUI()
+% ArUco_GUI - Interfaz gráfica para detección de marcadores ArUco con control serial
+% Requisitos: MATLAB R2022a+, Image Processing Toolbox, Computer Vision Toolbox
+
+%% ===== FIGURA PRINCIPAL =====
+% Ventana ampliada a 1380x780 para acomodar histogramas
+fig = uifigure('Name', 'Sistema de Detección ArUco', ...
+    'Position', [60 60 1366 768], ...
+    'Color', [0.12 0.14 0.18], ...
+    'Resize', 'on');
+
+%% ===== ESTADO COMPARTIDO =====
+estado = struct();
+estado.cam        = [];
+estado.P          = [];
+estado.conectado  = false;
+estado.camaraActiva = false;
+estado.contadorDetecciones = 0;
+estado.frame1     = [];
+estado.imgRecortada = [];
+estado.imgMarcadores = [];
+estado.bwKirsch   = [];
+
+%% ===== BARRA SUPERIOR: LOGOS + TÍTULO =====
+panelHeader = uipanel(fig, ...
+    'Position', [0 655 1380 125], ...
+    'BackgroundColor', [0.10 0.12 0.16], ...
+    'BorderType', 'none');
+
+uilabel(panelHeader, ...
+    'Text', 'SISTEMA DE DETECCIÓN ArUco — CONTROL SERIAL', ...
+    'Position', [10 45 900 35], ...
+    'FontSize', 14, 'FontWeight', 'bold', ...
+    'FontColor', [0.55 0.85 0.65], ...
+    'HorizontalAlignment', 'left');
+
+% Logo IPN
+try
+    imgIPN = imread('IPN.jpeg');
+    axLogoIPN = uiaxes(panelHeader, ...
+        'Position', [890 2 240 120], ...
+        'Color', [0.10 0.12 0.16], ...
+        'XColor', 'none', 'YColor', 'none');
+    axLogoIPN.Toolbar.Visible = 'off';
+    image(axLogoIPN, imgIPN);
+    axis(axLogoIPN, 'off'); axis(axLogoIPN, 'image');
+catch
+    uilabel(panelHeader, 'Text', 'IPN', ...
+        'Position', [890 45 240 35], ...
+        'FontColor', [0.8 0.8 0.8], 'FontWeight', 'bold', ...
+        'FontSize', 18, 'HorizontalAlignment', 'center');
+end
+
+% Logo UPIIZ
+try
+    imgUPIIZ = imread('UPIIZ.jpeg');
+    axLogoUPIIZ = uiaxes(panelHeader, ...
+        'Position', [1135 2 240 120], ...
+        'Color', [0.10 0.12 0.16], ...
+        'XColor', 'none', 'YColor', 'none');
+    axLogoUPIIZ.Toolbar.Visible = 'off';
+    image(axLogoUPIIZ, imgUPIIZ);
+    axis(axLogoUPIIZ, 'off'); axis(axLogoUPIIZ, 'image');
+catch
+    uilabel(panelHeader, 'Text', 'UPIIZ', ...
+        'Position', [1135 45 240 35], ...
+        'FontColor', [0.8 0.8 0.8], 'FontWeight', 'bold', ...
+        'FontSize', 18, 'HorizontalAlignment', 'center');
+end
+
+%% ===== PANEL IZQUIERDO: CONTROLES =====
+panelCtrl = uipanel(fig, ...
+    'Position', [10 10 280 645], ...
+    'BackgroundColor', [0.16 0.18 0.23], ...
+    'BorderType', 'none');
+
+uilabel(panelCtrl, ...
+    'Text', 'CONTROL PANEL', ...
+    'Position', [10 615 260 25], ...
+    'FontSize', 13, 'FontWeight', 'bold', ...
+    'FontColor', [0.55 0.85 0.65], ...
+    'HorizontalAlignment', 'center');
+
+% ---- SECCIÓN: PUERTO SERIAL ----
+uilabel(panelCtrl, 'Text', 'Puerto Serial', ...
+    'Position', [10 590 120 20], ...
+    'FontColor', [0.7 0.75 0.8], 'FontSize', 11, 'FontWeight', 'bold');
+
+uilabel(panelCtrl, 'Text', 'Puerto:', ...
+    'Position', [10 563 45 20], ...
+    'FontColor', [0.6 0.65 0.7], 'FontSize', 10);
+
+ddPuerto = uidropdown(panelCtrl, ...
+    'Items', obtenerPuertos(), ...
+    'Position', [58 560 180 24], ...
+    'BackgroundColor', [0.22 0.25 0.32], ...
+    'FontColor', [0.9 0.92 0.95], ...
+    'Tooltip', 'Selecciona el puerto COM', ...
+    'ValueChangedFcn', @(dd,~) sincronizarCampo(dd.Value));
+
+uibutton(panelCtrl, 'push', ...
+    'Text', '↺', ...
+    'Position', [242 560 28 24], ...
+    'BackgroundColor', [0.22 0.35 0.48], ...
+    'FontColor', [0.5 0.82 0.95], ...
+    'FontSize', 14, ...
+    'Tooltip', 'Refrescar puertos disponibles', ...
+    'ButtonPushedFcn', @(~,~) refrescarPuertos());
+
+uilabel(panelCtrl, 'Text', 'Manual:', ...
+    'Position', [10 534 45 18], ...
+    'FontColor', [0.5 0.55 0.6], 'FontSize', 9);
+
+txtPuertoManual = uieditfield(panelCtrl, 'text', ...
+    'Value', ddPuerto.Value, ...
+    'Position', [58 532 150 20], ...
+    'BackgroundColor', [0.18 0.21 0.28], ...
+    'FontColor', [0.85 0.88 0.92], ...
+    'FontSize', 10, ...
+    'Tooltip', 'Escribe aquí el puerto si no aparece en la lista (ej: COM8)');
+
+uilabel(panelCtrl, 'Text', '← editable', ...
+    'Position', [212 534 68 18], ...
+    'FontColor', [0.4 0.45 0.5], 'FontSize', 8);
+
+uilabel(panelCtrl, 'Text', 'Baud:', ...
+    'Position', [10 509 45 20], ...
+    'FontColor', [0.6 0.65 0.7], 'FontSize', 10);
+
+ddBaud = uidropdown(panelCtrl, ...
+    'Items', {'9600','19200','38400','57600','115200'}, ...
+    'Value', '9600', ...
+    'Position', [58 506 150 24], ...
+    'BackgroundColor', [0.22 0.25 0.32], ...
+    'FontColor', [0.9 0.92 0.95]);
+
+btnConectar = uibutton(panelCtrl, 'push', ...
+    'Text', '⚡ Conectar Puerto', ...
+    'Position', [10 476 260 28], ...
+    'BackgroundColor', [0.2 0.55 0.35], ...
+    'FontColor', [1 1 1], 'FontWeight', 'bold', ...
+    'ButtonPushedFcn', @(~,~) conectarPuerto());
+
+lblEstadoPuerto = uilabel(panelCtrl, 'Text', '● Desconectado', ...
+    'Position', [10 455 260 20], ...
+    'FontColor', [0.85 0.3 0.3], 'FontSize', 10);
+
+uipanel(panelCtrl, 'Position', [10 442 260 1], ...
+    'BackgroundColor', [0.3 0.33 0.4], 'BorderType', 'none');
+
+% ---- SECCIÓN: CÁMARA ----
+uilabel(panelCtrl, 'Text', 'Cámara', ...
+    'Position', [10 418 120 20], ...
+    'FontColor', [0.7 0.75 0.8], 'FontSize', 11, 'FontWeight', 'bold');
+
+uilabel(panelCtrl, 'Text', 'Índice:', ...
+    'Position', [10 393 50 20], ...
+    'FontColor', [0.6 0.65 0.7], 'FontSize', 10);
+
+spnCamara = uispinner(panelCtrl, ...
+    'Value', 1, 'Limits', [1 5], 'Step', 1, ...
+    'Position', [65 390 80 24], ...
+    'BackgroundColor', [0.22 0.25 0.32], ...
+    'FontColor', [0.9 0.92 0.95]);
+
+btnAbrirCam = uibutton(panelCtrl, 'push', ...
+    'Text', '📷 Abrir Cámara', ...
+    'Position', [10 360 260 28], ...
+    'BackgroundColor', [0.22 0.45 0.72], ...
+    'FontColor', [1 1 1], 'FontWeight', 'bold', ...
+    'ButtonPushedFcn', @(~,~) abrirCamara());
+
+lblEstadoCam = uilabel(panelCtrl, 'Text', '● Cámara cerrada', ...
+    'Position', [10 338 260 18], ...
+    'FontColor', [0.85 0.3 0.3], 'FontSize', 10);
+
+uilabel(panelCtrl, 'Text', 'Resolución:', ...
+    'Position', [10 315 75 18], ...
+    'FontColor', [0.6 0.65 0.7], 'FontSize', 10);
+
+ddResolucion = uidropdown(panelCtrl, ...
+    'Items', {'(abre la cámara)'}, ...
+    'Position', [88 312 182 22], ...
+    'Enable', 'off', ...
+    'BackgroundColor', [0.22 0.25 0.32], ...
+    'FontColor', [0.55 0.6 0.65]);
+
+btnAplicarRes = uibutton(panelCtrl, 'push', ...
+    'Text', '✓ Aplicar', ...
+    'Position', [10 288 260 24], ...
+    'Enable', 'off', ...
+    'BackgroundColor', [0.25 0.42 0.3], ...
+    'FontColor', [0.7 0.95 0.75], 'FontSize', 10, ...
+    'ButtonPushedFcn', @(~,~) aplicarResolucion());
+
+uipanel(panelCtrl, 'Position', [10 272 260 1], ...
+    'BackgroundColor', [0.3 0.33 0.4], 'BorderType', 'none');
+
+% ---- SECCIÓN: RECORTE ----
+uilabel(panelCtrl, 'Text', 'Región de Recorte', ...
+    'Position', [10 250 200 20], ...
+    'FontColor', [0.7 0.75 0.8], 'FontSize', 11, 'FontWeight', 'bold');
+
+campos   = {'X:', 'Y:', 'Ancho:', 'Alto:'};
+defaults = {350, 280, 480, 460};
+tags     = {'spnX','spnY','spnAncho','spnAlto'};
+posY     = [226 202 178 154];
+
+for i = 1:4
+    uilabel(panelCtrl, 'Text', campos{i}, ...
+        'Position', [10 posY(i) 50 20], ...
+        'FontColor', [0.6 0.65 0.7], 'FontSize', 10);
+    spn = uispinner(panelCtrl, ...
+        'Value', defaults{i}, 'Limits', [0 9999], 'Step', 10, ...
+        'Position', [65 posY(i)-2 100 22], ...
+        'BackgroundColor', [0.22 0.25 0.32], ...
+        'FontColor', [0.9 0.92 0.95], ...
+        'Tag', tags{i});
+    assignin('base', tags{i}, spn);
+end
+
+spnX     = evalin('base','spnX');
+spnY     = evalin('base','spnY');
+spnAncho = evalin('base','spnAncho');
+spnAlto  = evalin('base','spnAlto');
+
+btnImagenCompleta = uibutton(panelCtrl, 'push', ...
+    'Text', '⛶  Imagen completa', ...
+    'Position', [10 130 260 24], ...
+    'BackgroundColor', [0.22 0.32 0.42], ...
+    'FontColor', [0.6 0.82 0.95], 'FontSize', 10, ...
+    'ButtonPushedFcn', @(~,~) usarImagenCompleta());
+
+% ---- CONTADOR + ID ----
+uilabel(panelCtrl, 'Text', 'Detecciones totales:', ...
+    'Position', [10 108 140 18], ...
+    'FontColor', [0.5 0.55 0.6], 'FontSize', 10);
+
+lblContador = uilabel(panelCtrl, 'Text', '0', ...
+    'Position', [155 108 60 18], ...
+    'FontColor', [0.55 0.85 0.65], 'FontSize', 12, 'FontWeight', 'bold');
+
+uilabel(panelCtrl, 'Text', 'Último ID enviado:', ...
+    'Position', [10 86 140 18], ...
+    'FontColor', [0.5 0.55 0.6], 'FontSize', 10);
+
+lblUltimoID = uilabel(panelCtrl, 'Text', '—', ...
+    'Position', [155 86 100 18], ...
+    'FontColor', [0.9 0.75 0.3], 'FontSize', 12, 'FontWeight', 'bold');
+
+uipanel(panelCtrl, 'Position', [10 72 260 1], ...
+    'BackgroundColor', [0.3 0.33 0.4], 'BorderType', 'none');
+
+% ---- BOTÓN PRINCIPAL: CAPTURAR ----
+btnCapturar = uibutton(panelCtrl, 'push', ...
+    'Text', '▶  Capturar y Analizar', ...
+    'Position', [10 40 260 30], ...
+    'BackgroundColor', [0.55 0.85 0.65], ...
+    'FontColor', [0.1 0.12 0.15], 'FontSize', 13, 'FontWeight', 'bold', ...
+    'ButtonPushedFcn', @(~,~) capturarYAnalizar());
+
+btnLimpiar = uibutton(panelCtrl, 'push', ...
+    'Text', '🗑  Limpiar Vista', ...
+    'Position', [10 10 125 26], ...
+    'BackgroundColor', [0.3 0.33 0.4], ...
+    'FontColor', [0.75 0.78 0.83], ...
+    'ButtonPushedFcn', @(~,~) limpiarVista());
+
+btnCerrar = uibutton(panelCtrl, 'push', ...
+    'Text', '✕  Salir', ...
+    'Position', [145 10 125 26], ...
+    'BackgroundColor', [0.55 0.2 0.22], ...
+    'FontColor', [1 1 1], ...
+    'ButtonPushedFcn', @(~,~) cerrarApp());
+
+%% ===== PANEL LOG (abajo izquierda) =====
+panelLog = uipanel(fig, ...
+    'Position', [300 10 530 95], ...
+    'BackgroundColor', [0.1 0.12 0.16], ...
+    'BorderType', 'none');
+
+uilabel(panelLog, 'Text', 'LOG', ...
+    'Position', [10 72 40 16], ...
+    'FontColor', [0.45 0.5 0.55], 'FontSize', 9, 'FontWeight', 'bold');
+
+txtLog = uitextarea(panelLog, ...
+    'Position', [10 8 508 62], ...
+    'Editable', 'off', ...
+    'BackgroundColor', [0.1 0.12 0.16], ...
+    'FontColor', [0.65 0.75 0.65], ...
+    'FontSize', 10, ...
+    'Value', {'> Sistema listo. Conecta el puerto serial y abre la cámara.'});
+
+%% ===== PANEL MONITOR SERIAL (abajo derecha) =====
+panelSerial = uipanel(fig, ...
+    'Position', [840 10 530 95], ...
+    'BackgroundColor', [0.08 0.10 0.15], ...
+    'BorderType', 'none');
+
+uilabel(panelSerial, 'Text', 'MONITOR SERIAL', ...
+    'Position', [10 72 160 16], ...
+    'FontColor', [0.45 0.55 0.75], 'FontSize', 9, 'FontWeight', 'bold');
+
+uibutton(panelSerial, 'push', ...
+    'Text', '🗑', ...
+    'Position', [460 70 60 18], ...
+    'BackgroundColor', [0.18 0.22 0.30], ...
+    'FontColor', [0.6 0.65 0.75], 'FontSize', 9, ...
+    'ButtonPushedFcn', @(~,~) limpiarMonitor());
+
+txtSerial = uitextarea(panelSerial, ...
+    'Position', [10 8 508 62], ...
+    'Editable', 'off', ...
+    'BackgroundColor', [0.05 0.07 0.12], ...
+    'FontColor', [0.4 0.85 0.55], ...
+    'FontSize', 10, ...
+    'Value', {'[Monitor serial listo]'});
+
+% Timer para leer respuestas del Arduino cada 200ms
+tSerial = timer('ExecutionMode', 'fixedRate', 'Period', 0.2, ...
+    'TimerFcn', @(~,~) leerSerial());
+start(tSerial);
+
+%% ===== PANEL DERECHO: IMÁGENES + HISTOGRAMAS =====
+% Layout (dentro del panel, ancho=1080, alto=540):
+%
+%   Fila superior  (imágenes) : y=295  alto=210
+%   Fila inferior  (imágenes) : y=60   alto=210
+%   Fila histograma            : y=0    alto=55  ← debajo de cada imagen
+%
+%   4 columnas, cada una ancho=260, gaps de 10 px
+%   Col 1: x=10   Col 2: x=280  Col 3: x=550  Col 4: x=820
+%
+% Etiquetas y botones guardar encima de la fila superior (y≈510)
+
+panelImg = uipanel(fig, ...
+    'Position', [300 110 1070 540], ...
+    'BackgroundColor', [0.14 0.16 0.20], ...
+    'BorderType', 'none');
+
+titulosImg = {'Frame Original', 'Recorte en Grises', ...
+              'Detección ArUco', 'Binarización Kirsch'};
+
+% Dimensiones columnas e imágenes
+colX  = [10  278  546  814];   % x inicio de cada columna
+imgW  = 256;                    % ancho imagen
+imgH  = 192;                    % alto imagen
+histH = 100;                    % alto histograma
+gap   = 6;                      % gap vertical entre imagen e histograma
+labelH = 20;
+
+% Posición Y base de cada fila (dentro del panel)
+% Fila superior: la imagen arriba, el histograma debajo
+rowTopImgY  = 330;              % y base imagen fila superior
+rowBotImgY  = 118;              % y base imagen fila inferior
+
+% Orden de paneles:  1=Frame (sup izq)  2=Recorte (sup der primera)
+%                    3=Detección (inf izq)  4=Kirsch (inf der primera)
+% Pero queremos 4 columnas en 2 filas:
+%   sup: Frame | Recorte | Detección | Kirsch   (fila única de imágenes)
+% Cambiamos layout: 1 fila de 4 imágenes + 1 fila de 4 histogramas
+% para aprovechar el ancho extra de la ventana.
+
+% Con ventana de 1380 px y panel de 1070 px tenemos espacio para 4 columnas.
+% Usamos 1 sola fila de imágenes + 1 fila de histogramas abajo.
+
+imgY  = 290;    % y de las imágenes (dentro del panel)
+histY = 175;    % y de los histogramas
+lblY  = imgY + imgH + 4;  % y de los títulos (encima de la imagen)
+
+axImg  = gobjects(4,1);
+axHist = gobjects(4,1);
+btnGuardar = gobjects(4,1);
+
+for i = 1:4
+    cx = colX(i);
+
+    % ---- Título ----
+    uilabel(panelImg, 'Text', titulosImg{i}, ...
+        'Position', [cx lblY imgW-52 labelH], ...
+        'FontColor', [0.55 0.65 0.75], 'FontSize', 10, 'FontWeight', 'bold');
+
+    % ---- Botón guardar ----
+    btnGuardar(i) = uibutton(panelImg, 'push', ...
+        'Text', '💾', ...
+        'Position', [cx+imgW-50 lblY+2 50 18], ...
+        'BackgroundColor', [0.2 0.28 0.38], ...
+        'FontColor', [0.6 0.82 0.95], 'FontSize', 9, ...
+        'UserData', i, ...
+        'ButtonPushedFcn', @(src,~) guardarImagen(src.UserData));
+
+    % ---- Axes imagen ----
+    axImg(i) = uiaxes(panelImg, ...
+        'Position', [cx imgY imgW imgH], ...
+        'Color', [0.1 0.12 0.16], ...
+        'XColor', 'none', 'YColor', 'none');
+    axImg(i).Toolbar.Visible = 'off';
+    text(axImg(i), 0.5, 0.5, 'Sin imagen', ...
+        'Color', [0.35 0.4 0.45], 'FontSize', 10, ...
+        'HorizontalAlignment', 'center', 'Units', 'normalized');
+    axImg(i).XLim = [0 1]; axImg(i).YLim = [0 1];
+
+    % ---- Etiqueta histograma ----
+    uilabel(panelImg, 'Text', ['Histograma — ' titulosImg{i}], ...
+        'Position', [cx histY+histH+2 imgW labelH], ...
+        'FontColor', [0.45 0.55 0.65], 'FontSize', 8, 'FontWeight', 'bold');
+
+    % ---- Axes histograma ----
+    axHist(i) = uiaxes(panelImg, ...
+        'Position', [cx histY imgW histH], ...
+        'Color', [0.08 0.10 0.14], ...
+        'XColor', [0.4 0.45 0.5], ...
+        'YColor', [0.4 0.45 0.5], ...
+        'FontSize', 7);
+    axHist(i).Toolbar.Visible = 'off';
+    axHist(i).XLabel.String = 'Intensidad';
+    axHist(i).XLabel.FontSize = 7;
+    axHist(i).XLabel.Color = [0.4 0.45 0.5];
+    axHist(i).YLabel.String = 'N';
+    axHist(i).YLabel.FontSize = 7;
+    axHist(i).YLabel.Color = [0.4 0.45 0.5];
+    axHist(i).Box = 'off';
+    axHist(i).GridColor = [0.25 0.28 0.35];
+    axHist(i).GridAlpha = 0.4;
+    axHist(i).YGrid = 'on';
+    text(axHist(i), 0.5, 0.5, 'Sin datos', ...
+        'Color', [0.3 0.35 0.4], 'FontSize', 8, ...
+        'HorizontalAlignment', 'center', 'Units', 'normalized');
+end
+
+% ---- Leyenda de colores de histograma ----
+coloresHist  = {[0.35 0.7 0.95], [0.55 0.85 0.55], [0.35 0.7 0.95], [0.9 0.9 0.9]};
+% Frame=azul, Recorte=verde, Detección=azul, Kirsch=blanco
+
+%% ===== FUNCIONES LOCALES =====
+
+    function sincronizarCampo(val)
+        txtPuertoManual.Value = val;
+    end
+
+    function escribirLog(msg)
+        actual = txtLog.Value;
+        if ischar(actual), actual = {actual}; end
+        nueva = [actual; {['> ' msg]}];
+        if length(nueva) > 50, nueva = nueva(end-49:end); end
+        txtLog.Value = nueva;
+        scroll(txtLog, 'bottom');
+    end
+
+    function escribirSerial(msg, direccion)
+        ts = datestr(now, 'HH:MM:SS');
+        if strcmp(direccion, 'TX')
+            linea = ['[' ts '] TX >> ' msg];
+            color = [0.4 0.85 0.55];
+        else
+            linea = ['[' ts '] RX << ' msg];
+            color = [0.4 0.75 0.95];
+        end
+        actual = txtSerial.Value;
+        if ischar(actual), actual = {actual}; end
+        nueva = [actual; {linea}];
+        if length(nueva) > 100, nueva = nueva(end-99:end); end
+        txtSerial.Value = nueva;
+        txtSerial.FontColor = color;
+        scroll(txtSerial, 'bottom');
+    end
+
+    function leerSerial()
+        if ~estado.conectado || isempty(estado.P), return; end
+        try
+            nbytes = estado.P.NumBytesAvailable;
+            if nbytes > 0
+                datos = read(estado.P, nbytes, 'char');
+                lineas = strsplit(strtrim(datos), {char(10), char(13)});
+                for k = 1:length(lineas)
+                    if ~isempty(strtrim(lineas{k}))
+                        escribirSerial(strtrim(lineas{k}), 'RX');
+                    end
+                end
+            end
+        catch
+        end
+    end
+
+    function limpiarMonitor()
+        txtSerial.Value = {'[Monitor limpiado]'};
+    end
+
+    function refrescarPuertos()
+        nuevosPuertos = obtenerPuertos();
+        ddPuerto.Items = nuevosPuertos;
+        if ~isempty(nuevosPuertos)
+            txtPuertoManual.Value = nuevosPuertos{1};
+            ddPuerto.Value = nuevosPuertos{1};
+        end
+        escribirLog(['Puertos refrescados: ' strjoin(nuevosPuertos, ', ')]);
+    end
+
+    function conectarPuerto()
+        try
+            if estado.conectado
+                clear estado.P;
+                estado.P = [];
+                estado.conectado = false;
+                lblEstadoPuerto.Text = '● Desconectado';
+                lblEstadoPuerto.FontColor = [0.85 0.3 0.3];
+                btnConectar.Text = '⚡ Conectar Puerto';
+                btnConectar.BackgroundColor = [0.2 0.55 0.35];
+                escribirLog('Puerto serial cerrado.');
+            else
+                puerto = strtrim(txtPuertoManual.Value);
+                if isempty(puerto), puerto = ddPuerto.Value; end
+                baud = str2double(ddBaud.Value);
+                estado.P = serialport(puerto, baud);
+                estado.conectado = true;
+                lblEstadoPuerto.Text = ['● Conectado: ' puerto];
+                lblEstadoPuerto.FontColor = [0.3 0.85 0.5];
+                btnConectar.Text = '✕ Desconectar';
+                btnConectar.BackgroundColor = [0.6 0.2 0.22];
+                escribirLog(['Puerto ' puerto ' @ ' num2str(baud) ' baud conectado.']);
+            end
+        catch ME
+            escribirLog(['ERROR puerto: ' ME.message]);
+            uialert(fig, ME.message, 'Error de Puerto', 'Icon', 'error');
+        end
+    end
+
+    function abrirCamara()
+        try
+            if estado.camaraActiva
+                clear estado.cam;
+                estado.cam = [];
+                estado.camaraActiva = false;
+                lblEstadoCam.Text = '● Cámara cerrada';
+                lblEstadoCam.FontColor = [0.85 0.3 0.3];
+                btnAbrirCam.Text = '📷 Abrir Cámara';
+                btnAbrirCam.BackgroundColor = [0.22 0.45 0.72];
+                ddResolucion.Items = {'(abre la cámara)'};
+                ddResolucion.Enable = 'off';
+                ddResolucion.FontColor = [0.55 0.6 0.65];
+                btnAplicarRes.Enable = 'off';
+                escribirLog('Cámara liberada.');
+            else
+                idxCam = spnCamara.Value;
+                estado.cam = webcam(idxCam);
+                res = estado.cam.AvailableResolutions;
+                ddResolucion.Items = res;
+                ddResolucion.Enable = 'on';
+                ddResolucion.FontColor = [0.9 0.92 0.95];
+                btnAplicarRes.Enable = 'on';
+                if any(strcmp(res, '1280x960'))
+                    estado.cam.Resolution = '1280x960';
+                    ddResolucion.Value = '1280x960';
+                else
+                    estado.cam.Resolution = res{end};
+                    ddResolucion.Value = res{end};
+                end
+                escribirLog(['Cámara ' num2str(idxCam) ': ' num2str(length(res)) ' resoluciones disponibles:']);
+                for r = 1:length(res)
+                    if strcmp(res{r}, estado.cam.Resolution)
+                        escribirLog(['  [' num2str(r) '] ' res{r} '  ← activa']);
+                    else
+                        escribirLog(['  [' num2str(r) '] ' res{r}]);
+                    end
+                end
+                estado.camaraActiva = true;
+                lblEstadoCam.Text = ['● Cámara ' num2str(idxCam) ': ' estado.cam.Resolution];
+                lblEstadoCam.FontColor = [0.3 0.85 0.5];
+                btnAbrirCam.Text = '■ Cerrar Cámara';
+                btnAbrirCam.BackgroundColor = [0.55 0.2 0.22];
+                escribirLog(['Usando: ' estado.cam.Resolution]);
+            end
+        catch ME
+            escribirLog(['ERROR cámara: ' ME.message]);
+            uialert(fig, ME.message, 'Error de Cámara', 'Icon', 'error');
+        end
+    end
+
+    function usarImagenCompleta()
+        if ~estado.camaraActiva
+            uialert(fig, 'Abre la cámara primero.', 'Cámara no activa', 'Icon', 'warning');
+            return;
+        end
+        resActiva = estado.cam.Resolution;
+        partes = strsplit(resActiva, 'x');
+        spnX.Value     = 0;
+        spnY.Value     = 0;
+        spnAncho.Value = str2double(partes{1});
+        spnAlto.Value  = str2double(partes{2});
+        escribirLog(['Recorte → imagen completa (' resActiva ')']);
+    end
+
+    function aplicarResolucion()
+        if ~estado.camaraActiva, return; end
+        try
+            resElegida = ddResolucion.Value;
+            estado.cam.Resolution = resElegida;
+            lblEstadoCam.Text = ['● Cámara activa: ' resElegida];
+            escribirLog(['Resolución cambiada a: ' resElegida]);
+        catch ME
+            escribirLog(['ERROR al cambiar resolución: ' ME.message]);
+        end
+    end
+
+    % ---- Dibuja histograma en el axes indicado ----
+    function dibujarHistograma(ax, img, color)
+        cla(ax);
+        % Convertir a escala de grises si es RGB
+        if ndims(img) == 3
+            imgG = rgb2gray(img);
+        else
+            imgG = img;
+        end
+        imgG = double(imgG(:));
+
+        % Calcular histograma con imhist (256 bins, Image Processing Toolbox)
+        [cuenta, xout] = imhist(uint8(imgG), 64);
+
+        % Dibujar como área rellena
+        area(ax, xout, cuenta, ...
+            'FaceColor', color, ...
+            'EdgeColor', color * 0.7, ...
+            'FaceAlpha', 0.75, ...
+            'LineWidth', 0.5);
+
+        ax.Color     = [0.08 0.10 0.14];
+        ax.XColor    = [0.45 0.5 0.55];
+        ax.YColor    = [0.45 0.5 0.55];
+        ax.FontSize  = 7;
+        ax.XLim      = [0 255];
+        ax.Box       = 'off';
+        ax.YGrid     = 'on';
+        ax.GridColor = [0.25 0.28 0.35];
+        ax.GridAlpha = 0.4;
+        ax.XLabel.String = 'Intensidad';
+        ax.XLabel.FontSize = 7;
+        ax.XLabel.Color = [0.45 0.5 0.55];
+        ax.YLabel.String = 'N';
+        ax.YLabel.FontSize = 7;
+        ax.YLabel.Color = [0.45 0.5 0.55];
+    end
+
+    function capturarYAnalizar()
+        if ~estado.camaraActiva
+            uialert(fig, 'Abre la cámara primero.', 'Cámara no activa', 'Icon', 'warning');
+            return;
+        end
+
+        btnCapturar.Enable = 'off';
+        btnCapturar.Text = '⏳ Procesando...';
+        btnCapturar.BackgroundColor = [0.45 0.65 0.5];
+        drawnow;
+
+        try
+            %--- 1. CAPTURA ---
+            escribirLog('Capturando frame...');
+            pause(0.5);
+            frame = snapshot(estado.cam);
+            estado.frame1 = frame;
+            mostrarImagen(axImg(1), frame);
+            dibujarHistograma(axHist(1), frame, coloresHist{1});
+            drawnow;
+
+            %--- 2. RECORTE ---
+            GS = rgb2gray(frame);
+            x = spnX.Value;  y = spnY.Value;
+            w = spnAncho.Value;  h = spnAlto.Value;
+            [fh, fw] = size(GS);
+            x = min(x, fw-10); y = min(y, fh-10);
+            w = min(w, fw-x);  h = min(h, fh-y);
+
+            imgRec      = imcrop(GS, [x y w h]);
+            imgRecColor = imcrop(frame, [x y w h]);
+            estado.imgRecortada = imgRec;
+
+            mostrarImagen(axImg(2), imgRec);
+            dibujarHistograma(axHist(2), imgRec, coloresHist{2});
+            drawnow;
+            escribirLog(['Recorte: x=' num2str(x) ' y=' num2str(y) ...
+                         ' ' num2str(w) 'x' num2str(h)]);
+
+            %--- 3. DETECCIÓN ArUco ---
+            markerFamily  = 'DICT_4x4_250';
+            imgMarcadores = imgRecColor;
+
+            try
+                [ids, locations, ~] = readArucoMarker(imgRec, markerFamily);
+
+                if ~isempty(ids)
+                    escribirLog([num2str(length(ids)) ' marcador(es) detectado(s).']);
+                    estado.contadorDetecciones = ...
+                        estado.contadorDetecciones + length(ids);
+                    lblContador.Text = num2str(estado.contadorDetecciones);
+
+                    for i = 1:length(ids)
+                        loc = locations(:,:,i);
+                        imgMarcadores = insertShape(imgMarcadores, 'polygon', {loc}, ...
+                            'Color', 'green', 'LineWidth', 3);
+                        centro = mean(loc);
+                        imgMarcadores = insertText(imgMarcadores, centro, ...
+                            ['ID:' num2str(ids(i))], 'FontSize', 16, ...
+                            'BoxOpacity', 0.6, 'TextColor', 'yellow');
+
+                        if estado.conectado
+                            if ids(i) == 0
+                                write(estado.P, "0", "char");
+                                escribirLog('  → Enviado: 0 (contenedor A)');
+                                escribirSerial('0', 'TX');
+                                lblUltimoID.Text = '0 → A';
+                                lblUltimoID.FontColor = [0.4 0.85 0.55];
+                            elseif ids(i) == 1
+                                write(estado.P, "1", "char");
+                                escribirLog('  → Enviado: 1 (contenedor B)');
+                                escribirSerial('1', 'TX');
+                                lblUltimoID.Text = '1 → B';
+                                lblUltimoID.FontColor = [0.3 0.65 0.95];
+                            elseif ids(i) == 2
+                                write(estado.P, "2", "char");
+                                escribirLog('  → Enviado: 2 (contenedor C)');
+                                escribirSerial('2', 'TX');
+                                lblUltimoID.Text = '2 → C';
+                                lblUltimoID.FontColor = [0.95 0.75 0.3];
+                            else
+                                write(estado.P, "X", "char");
+                                escribirLog(['  → ID ' num2str(ids(i)) ...
+                                             ' no válido. Enviado: X']);
+                                escribirSerial('X', 'TX');
+                                lblUltimoID.Text = [num2str(ids(i)) ' → X'];
+                                lblUltimoID.FontColor = [0.85 0.35 0.35];
+                            end
+                        else
+                            escribirLog(['  (Puerto no conectado) ID: ' ...
+                                         num2str(ids(i))]);
+                            lblUltimoID.Text = [num2str(ids(i)) ' (sin envío)'];
+                        end
+                    end
+                else
+                    escribirLog('No se detectaron marcadores ArUco.');
+                    imgMarcadores = insertText(imgRecColor, [5 5], 'Sin marcadores',...
+                        'FontSize', 14, 'TextColor', 'red', 'BoxOpacity', 0.5);
+                    if estado.conectado
+                        write(estado.P, "X", "char");
+                        escribirLog('  → Enviado: X (sin marcador)');
+                        escribirSerial('X', 'TX');
+                        lblUltimoID.Text = 'X';
+                        lblUltimoID.FontColor = [0.85 0.35 0.35];
+                    end
+                end
+            catch ME_aruco
+                escribirLog(['Error ArUco: ' ME_aruco.message]);
+            end
+
+            estado.imgMarcadores = imgMarcadores;
+            mostrarImagen(axImg(3), imgMarcadores);
+            dibujarHistograma(axHist(3), imgMarcadores, coloresHist{3});
+            drawnow;
+
+            %--- 4. KIRSCH ---
+            escribirLog('Calculando bordes Kirsch...');
+            borde       = edge_kirsch(imgRec);
+            borde_suave = imgaussfilt(borde, 1.2);
+            bw          = threshold_custom(borde_suave, 120);
+            estado.bwKirsch = bw;
+
+            mostrarImagen(axImg(4), bw);
+            dibujarHistograma(axHist(4), bw, coloresHist{4});
+            drawnow;
+            escribirLog('✓ Procesamiento completo.');
+
+        catch ME
+            escribirLog(['ERROR: ' ME.message]);
+            uialert(fig, ME.message, 'Error de Procesamiento', 'Icon', 'error');
+        end
+
+        btnCapturar.Enable = 'on';
+        btnCapturar.Text = '▶  Capturar y Analizar';
+        btnCapturar.BackgroundColor = [0.55 0.85 0.65];
+    end
+
+    function guardarImagen(idx)
+        switch idx
+            case 1, img = estado.frame1;
+            case 2, img = estado.imgRecortada;
+            case 3, img = estado.imgMarcadores;
+            case 4, img = estado.bwKirsch;
+        end
+        if isempty(img)
+            uialert(fig, 'No hay imagen en este panel todavía.', ...
+                    'Sin imagen', 'Icon', 'warning');
+            return;
+        end
+        nombres = {'frame_original','recorte_grises','deteccion_aruco','kirsch_bw'};
+        ts = datestr(now, 'yyyymmdd_HHMMSS');
+        nombreDefecto = [nombres{idx} '_' ts '.png'];
+        [archivo, ruta] = uiputfile( ...
+            {'*.png','PNG';'*.jpg','JPEG';'*.bmp','BMP'}, ...
+            'Guardar imagen como...', nombreDefecto);
+        if isequal(archivo, 0), return; end
+        try
+            imwrite(img, fullfile(ruta, archivo));
+            escribirLog(['💾 Guardado: ' archivo]);
+        catch ME
+            escribirLog(['ERROR al guardar: ' ME.message]);
+            uialert(fig, ME.message, 'Error al guardar', 'Icon', 'error');
+        end
+    end
+
+    function limpiarVista()
+        for i = 1:4
+            cla(axImg(i));
+            axImg(i).XColor = 'none'; axImg(i).YColor = 'none';
+            text(axImg(i), 0.5, 0.5, 'Sin imagen', ...
+                'Color', [0.35 0.4 0.45], 'FontSize', 10, ...
+                'HorizontalAlignment', 'center', 'Units', 'normalized');
+            axImg(i).XLim = [0 1]; axImg(i).YLim = [0 1];
+
+            cla(axHist(i));
+            text(axHist(i), 0.5, 0.5, 'Sin datos', ...
+                'Color', [0.3 0.35 0.4], 'FontSize', 8, ...
+                'HorizontalAlignment', 'center', 'Units', 'normalized');
+        end
+        txtLog.Value = {'> Vista limpiada.'};
+        escribirLog('Sistema listo.');
+        lblUltimoID.Text = '—';
+    end
+
+    function cerrarApp()
+        resp = uiconfirm(fig, 'Cerrar la aplicación?', 'Confirmar salida', ...
+            'Options', {'Sí, cerrar','Cancelar'}, 'DefaultOption', 2, ...
+            'Icon', 'question');
+        if strcmp(resp, 'Sí, cerrar')
+            try
+                if estado.camaraActiva && ~isempty(estado.cam)
+                    clear estado.cam;
+                end
+                if estado.conectado && ~isempty(estado.P)
+                    clear estado.P;
+                end
+            catch
+            end
+            escribirLog('Cerrando aplicación...');
+            try, stop(tSerial); delete(tSerial); catch, end
+            pause(0.3);
+            delete(fig);
+        end
+    end
+
+end % fin ArUco_GUI
+
+%% ========== FUNCIONES AUXILIARES ==========
+
+function puertos = obtenerPuertos()
+    try
+        info = serialportlist("available");
+        if isempty(info)
+            puertos = {'COM3','COM4','COM5','COM6','COM7', ...
+                       '/dev/ttyUSB0','/dev/ttyACM0'};
+        else
+            puertos = cellstr(info);
+        end
+    catch
+        puertos = {'COM3','COM4','COM5','COM6','COM7', ...
+                   '/dev/ttyUSB0','/dev/ttyACM0'};
+    end
+end
+
+function mostrarImagen(ax, img)
+    cla(ax);
+    if ismatrix(img)
+        img = repmat(img, 1, 1, 3);
+    end
+    image(ax, img);
+    ax.XTick = []; ax.YTick = [];
+    ax.XColor = 'none'; ax.YColor = 'none';
+    ax.DataAspectRatio = [1 1 1];
+    ax.PlotBoxAspectRatioMode = 'auto';
+    ax.Color = [0.08 0.10 0.13];
+    axis(ax, 'tight');
+end
+
+function edge_img = edge_kirsch(img)
+    img = double(img);
+    K{1} = [-3 -3  5; -3  0  5; -3 -3  5];
+    K{2} = [-3  5  5; -3  0  5; -3 -3 -3];
+    K{3} = [ 5  5  5; -3  0 -3; -3 -3 -3];
+    K{4} = [ 5  5 -3;  5  0 -3; -3 -3 -3];
+    K{5} = [ 5 -3 -3;  5  0 -3;  5 -3 -3];
+    K{6} = [-3 -3 -3;  5  0 -3;  5  5 -3];
+    K{7} = [-3 -3 -3; -3  0 -3;  5  5  5];
+    K{8} = [-3 -3 -3; -3  0  5; -3  5  5];
+    [fil, col] = size(img);
+    edge_img = zeros(fil, col);
+    for i = 2:fil-1
+        for j = 2:col-1
+            ventana = img(i-1:i+1, j-1:j+1);
+            max_val = 0;
+            for k = 1:8
+                valor = abs(sum(sum(ventana .* K{k})));
+                if valor > max_val, max_val = valor; end
+            end
+            edge_img(i, j) = max_val;
+        end
+    end
+    edge_img = uint8(edge_img);
+end
+
+function bw = threshold_custom(img, umbral)
+    if isa(img, 'uint8'), img = double(img); end
+    bw = uint8(img >= umbral) * 255;
+end
